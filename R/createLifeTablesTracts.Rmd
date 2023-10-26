@@ -17,6 +17,7 @@ knitr::opts_chunk$set(
 library(glue)
 library(ggthemes)
 library(here)
+library(colorspace)
 library(gt)
 library(leaflet)
 library(tidyverse)
@@ -248,6 +249,7 @@ shapefileJoined %>%
 LEMap <- shapefileJoined %>%
   ggplot() +
   geom_sf(mapping=aes(fill=e0)) +
+  scale_fill_continuous_sequential() +
   labs(fill='Life-Expectancy') +
   theme_map() +
   theme(legend.position = 'left')

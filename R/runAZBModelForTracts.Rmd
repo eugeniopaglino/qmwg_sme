@@ -294,6 +294,27 @@ ggsave(modelExamplePlots,file=here('figures','ageFit.pdf'),height = 5, width = 7
 ```
 
 ```{r}
+extremeCase <- posterior.data %>%
+  filter(geo == 128) %>%
+  ggplot() +
+  geom_ribbon(mapping=aes(x=age,ymin=log_rate.post.low,ymax=log_rate.post.up),alpha=0.5) +
+  geom_line(mapping=aes(x=age,y=log_rate.post.med,linetype='Predicted')) +
+  geom_line(mapping=aes(x=age,y=log_rate,linetype='Observed')) +
+  labs(x='Age',y='Log Mortality Rate',
+       linetype='') +
+  theme_minimal() +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        legend.position = 'bottom')
+
+extremeCase
+```
+
+```{r}
+ggsave(extremeCase,file=here('figures','extremeCase.pdf'),height = 5, width = 7)
+```
+
+```{r}
 modelExamplePlots <- posterior.data %>%
   #filter(geo %in% sample(1:max(geo),20)) %>%
   ggplot() +
