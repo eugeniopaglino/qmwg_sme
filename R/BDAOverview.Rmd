@@ -1,0 +1,91 @@
+---
+title: "A Single-Parameter Poisson Model"
+author: "Eugenio Paglino"
+date: "\today"
+output:
+  html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+library(here)
+library(tidyverse)
+
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r}
+# Do not rely on this to completely clean your environment
+# Better to do a full restart of R before running
+rm(list=ls())
+
+i_am('R/BDAOverview.Rmd')
+inDir <- here('data','input')
+outDir <- here('data','output')
+```
+
+```{r}
+set.seed(42)
+```
+
+```{r}
+y <- rpois(n=20,lambda=10)
+
+means <- rep(c(7,10,14),each=3)
+vars <- rep(c(1,3,5),times=3)
+
+alphas <- (means^2)/vars
+betas <- means/vars
+
+x <- seq(0,20,length.out=100)
+
+data <- map2_dfr(
+  means,
+  vars,
+  ~ tibble(
+    alpha = (.x^2)/.y,
+    beta = .x/.y,
+    mean = .x,
+    var = .y,
+    x = x,
+    theta_like = dgamma(x,shape=sum(y),rate=length(y)),
+    theta_prior = dgamma(x,shape=(.x^2)/.y,rate=.x/.y),
+    theta_post = dgamma(x,shape=(.x^2)/.y + sum(y),rate=.x/.y + length(y))
+    )
+  )
+```
+
+```{r}
+data <- data %>%
+  pivot_longer(cols = c(theta_like,theta_prior,theta_post), names_to = 'type', values_to = 'theta')
+```
+
+```{r}
+BDAExample <- data %>%
+  mutate(type=case_when(type=='theta_like' ~ 'Likelihood',
+                        type=='theta_prior' ~ 'Prior',
+                        type=='theta_post' ~ 'Posterior')) %>%
+  ggplot() +
+  geom_line(mapping=aes(x=x,y=theta,linetype=type)) +
+  labs(linetype='',
+       y=latex2exp::TeX('p(\\theta)'),
+       x=latex2exp::TeX('\\theta')) +
+  ggh4x::facet_nested('Prior Variance' + var ~ 'Prior Mean' + mean) +
+  theme_minimal() +
+  theme(legend.position = 'bottom')
+
+BDAExample
+```
+
+```{r}
+ggsave(BDAExample,file=here('figures','BDAExample.pdf'),width = 6,height = 4)
+```

@@ -1,0 +1,423 @@
+---
+title: "Modeling Sub-County Mortality by Age"
+author: "Eugenio Paglino"
+date: "\today"
+output:
+  html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+library(here)
+library(rstan)
+library(bayesplot)
+library(magrittr)
+library(colorspace)
+library(patchwork)
+library(ggthemes)
+library(tidyverse)
+
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r}
+# Do not rely on this to completely clean your environment
+# Better to do a full restart of R before running
+rm(list=ls())
+
+i_am('R/runAZBModelForTracts.Rmd')
+inDir <- here('data','input')
+outDir <- here('data','output')
+```
+
+```{r}
+# Set Stan options.
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+set.seed(42)
+```
+
+```{r}
+ltData <- read_csv(here(outDir,'ltTractMWData.csv'),col_types = 'ciii')
+```
+
+```{r}
+modelData <- ltData %>%
+  filter(!is.na(deaths)) %>%
+  group_by(tractCode) %>%
+  mutate(totPop = sum(pop),
+         minPop = min(pop)) %>%
+  ungroup() %>%
+  filter(totPop>=1000,
+         minPop>0) %>%
+  mutate(pop=pop*5) %>%
+  arrange(tractCode,x) %>%
+  group_by(tractCode) %>%
+  mutate(geoID=cur_group_id()) %>%
+  ungroup() %>%
+  group_by(x) %>%
+  mutate(ageID=cur_group_id()) %>%
+  ungroup() %>%
+  group_by(tractCode,x) %>%
+  mutate(geoAgeID=cur_group_id()) %>%
+  ungroup()
+```
+
+```{r}
+decompose <- function(data) {
+  data <- data %>%
+    filter(deaths>0) %>%
+    mutate(m=log(deaths/pop))
+  
+  lambda_0 <- data %>%
+    summarise(lambda_0 = mean(m)) %>%
+    pull(lambda_0)
+  
+  data <- data %>%
+    mutate(lambda_0 = lambda_0) 
+  
+  lambda_a <- data %>%
+    group_by(x) %>%
+    summarise(lambda_a = mean(m - lambda_0)) %>%
+    ungroup()
+  
+  lambda_s <- data %>%
+    group_by(geoID) %>%
+    summarise(lambda_s = mean(m - lambda_0)) %>%
+    ungroup()
+  
+  lambda_as <- data %>%
+    left_join(lambda_a,by='x') %>%
+    left_join(lambda_s,by='geoID') %>%
+    group_by(x,geoID) %>%
+    summarise(lambda_as = mean(m - lambda_0 - lambda_a - lambda_s)) %>%
+    ungroup()
+  
+  return(
+    list(
+      lambda_0=lambda_0,
+      lambda_a=pull(lambda_a,lambda_a),
+      lambda_s=pull(lambda_s,lambda_s),
+      lambda_as=pull(lambda_as,lambda_as),
+      data=lambda_as
+      )
+    )
+}
+```
+
+```{r}
+decompData <- decompose(modelData)
+
+decompData %$%
+  data %>%
+  filter(geoID %in% sample(1:max(decompData$data$geoID),6)) %>%
+  ggplot() +
+  geom_line(mapping=aes(x=x,y=lambda_as)) +
+  facet_wrap(~geoID)
+```
+
+```{r}
+load(here(outDir,'ageComponents04.RData'))
+```
+
+```{r}
+SVDComponents <- as_tibble(SVDComponents)
+names(SVDComponents) <- c('age1','age2','age3')
+SVDComponents <- SVDComponents %>%
+  mutate(x = unique(modelData$x)) %>%
+  relocate(x)
+
+SVDComponents <- modelData %>%
+  left_join(SVDComponents,by='x') %>%
+  select(age1:age3) %>%
+  as.matrix()
+```
+
+```{r}
+# Specify data and parameter values.
+data <- list(
+  N = nrow(modelData),
+  S = max(modelData$geoID),
+  y = modelData %>% pull(deaths),
+  pop = modelData %>% pull(pop),
+  ageComp = SVDComponents,
+  geo = modelData %>% pull(geoID)
+)
+```
+
+```{r}
+modelData %>%
+  filter(deaths>0) %>%
+  mutate(m=log(deaths/pop)) %>%
+  ggplot() +
+  geom_line(mapping=aes(x=ageID,y=m,group=geoID),alpha=0.2) +
+  theme_minimal()
+```
+
+```{r}
+# Generate data.
+modelFit <- stan(
+  file = here('R','AZBModelForTracts.stan'),
+  data = data
+  )
+```
+
+```{r}
+traceplot(
+  modelFit,
+  pars = c('beta_a1','beta_a2','beta_a3'), 
+  inc_warmup = FALSE
+  )
+```
+
+```{r, eval=F}
+traceplot(
+  modelFit,
+  pars = c('beta_s'), 
+  inc_warmup = FALSE
+  )
+```
+
+```{r}
+traceplot(
+  modelFit,
+  pars = c('beta_0','sigma_s','sigma_as2','sigma_as3'), 
+  inc_warmup = FALSE
+  )
+```
+
+```{r}
+posteriors <- rstan::extract(modelFit)
+```
+
+```{r}
+predict.stan <- function(posteriors,data) {
+  
+  beta_as2 <- apply(posteriors$beta_as2[,data$geo],M=2,function(x) x + posteriors$beta_a2)
+  beta_as3 <- apply(posteriors$beta_as3[,data$geo],M=2,function(x) x + posteriors$beta_a3)
+
+  log.rates <- posteriors$beta_s[,data$geo]
+  log.rates <- log.rates + t(sapply(posteriors$beta_a1,function(x) x * data$ageComp[,1]))
+  log.rates <- log.rates + t(apply(beta_as2,M=1,function(x) x * data$ageComp[,2]))
+  log.rates <- log.rates + t(apply(beta_as3,M=1,function(x) x * data$ageComp[,3]))
+  log.rates = apply(log.rates,M=2,function(x) x + posteriors$beta_0)
+  deaths <- t(apply(log.rates,M=1,function(x) rpois(length(x),exp(x)*data$pop)))
+  log.rates.post <- t(apply(deaths,M=1,function(x) log(x/data$pop)))
+  
+  return(
+    list(
+      log.rates = log.rates,
+      deaths = deaths,
+      log.rates.post = log.rates.post
+      )
+    )
+}
+```
+
+```{r}
+build.posterior.data <- function(predicted.values,data) {
+  
+  log_rate.post.mean <- apply(predicted.values$log.rates,M=2,mean)
+  log_rate.post.med <- apply(predicted.values$log.rates,M=2,median)
+  log_rate.post.low <- apply(predicted.values$log.rates,M=2,function(x) quantile(x,probs=0.1))
+  log_rate.post.up <- apply(predicted.values$log.rates,M=2,function(x) quantile(x,probs=0.9))
+  
+  log_rate.pred.mean <- apply(predicted.values$log.rates.post,M=2,mean)  
+  log_rate.pred.med <- apply(predicted.values$log.rates.post,M=2,median)
+  log_rate.pred.low <- apply(predicted.values$log.rates.post,M=2,function(x) quantile(x,probs=0.1))
+  log_rate.pred.up <- apply(predicted.values$log.rates.post,M=2,function(x) quantile(x,probs=0.9))
+  
+  deaths.pred.mean <- apply(predicted.values$deaths,M=2,mean)
+  deaths.pred.med <- apply(predicted.values$deaths,M=2,median)
+  deaths.pred.low <- apply(predicted.values$deaths,M=2,function(x) quantile(x,probs=0.1))
+  deaths.pred.up <- apply(predicted.values$deaths,M=2,function(x) quantile(x,probs=0.9))
+  
+  posterior.data <- tibble(
+    log_rate.post.mean = log_rate.post.mean,
+    log_rate.post.med = log_rate.post.med,
+    log_rate.post.low = log_rate.post.low,
+    log_rate.post.up = log_rate.post.up,
+    log_rate.pred.mean = log_rate.pred.mean,
+    log_rate.pred.med = log_rate.pred.med,
+    log_rate.pred.low = log_rate.pred.low,
+    log_rate.pred.up = log_rate.pred.up,
+    log_rate = log(data$deaths/data$pop),
+    deaths.pred.mean = deaths.pred.mean,
+    deaths.pred.med = deaths.pred.med,
+    deaths.pred.low = deaths.pred.low,
+    deaths.pred.up = deaths.pred.up,
+    deaths = data$deaths,
+    pop = data$pop,
+    geo = data$geoID,
+    age = data$ageID
+    )
+  
+  return(posterior.data)
+}
+```
+
+```{r}
+predicted.values <- predict.stan(posteriors,data)
+posterior.data <- build.posterior.data(predicted.values,modelData)
+```
+
+```{r}
+modelExamplePlots <- posterior.data %>%
+  filter(geo %in% sample(1:max(geo),20)) %>%
+  ggplot() +
+  geom_ribbon(mapping=aes(x=age,ymin=log_rate.post.low,ymax=log_rate.post.up),alpha=0.5) +
+  geom_line(mapping=aes(x=age,y=log_rate.post.med,linetype='Predicted')) +
+  geom_line(mapping=aes(x=age,y=log_rate,linetype='Observed')) +
+  facet_wrap(~geo) +
+  labs(x='Age',y='Log Mortality Rate',
+       linetype='') +
+  theme_minimal() +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        legend.position = 'bottom')
+
+modelExamplePlots
+```
+
+```{r}
+ggsave(modelExamplePlots,file=here('figures','ageFit.pdf'),height = 5, width = 7)
+```
+
+```{r}
+modelExamplePlots <- posterior.data %>%
+  #filter(geo %in% sample(1:max(geo),20)) %>%
+  ggplot() +
+  geom_line(mapping=aes(x=age,y=log_rate.post.med,group=geo),alpha=0.2) +
+  labs(x='Age',y='Log Mortality Rate',
+       linetype='') +
+  theme_minimal() +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        legend.position = 'bottom')
+
+modelExamplePlots
+```
+
+```{r}
+ggsave(modelExamplePlots,file=here('figures','ageFit2.pdf'),height = 5, width = 7)
+```
+
+```{r}
+posterior.data %>%
+  select(ageID=age,geoID=geo,
+         log_rate,log_rate.post.mean) %>%
+  left_join(modelData,by=c('ageID','geoID')) %>%
+  select(x,tractCode,deaths,pop,log_rate,log_rate.post.mean) %>%
+  write_csv(here(outDir,'ltModelMWDataForTracts.csv'))
+```
+
+```{r}
+tract.rates <- posterior.data %>%
+  select(ageID=age,geoID=geo,
+         log_rate,log_rate.post.mean) %>%
+  left_join(modelData,by=c('ageID','geoID')) %>%
+  select(x,tractCode,deaths,pop,log_rate,log_rate.post.mean) %>%
+  group_by(tractCode) %>%
+  summarise(mrate.pred.mean=sum(exp(log_rate.post.mean)*(pop/sum(pop))),
+            deaths=sum(deaths),
+            pop=sum(pop)) %>%
+  ungroup() %>%
+  mutate(mrate = deaths/pop)
+```
+
+```{r}
+shapefile <- sf::read_sf(here(inDir,'tl_2020_25_tract','tl_2020_25_tract.shp'))
+shapefile <- shapefile %>%
+  filter(ALAND>0) %>%
+  select(tractCode=GEOID,
+         name=NAMELSAD)
+```
+
+```{r}
+shapefile <- shapefile %>%
+  left_join(
+    tract.rates %>%
+      group_by(tractCode) %>%
+      summarise(deaths=sum(deaths)) %>%
+      ungroup(),
+    by='tractCode'
+  )
+```
+
+```{r}
+shapefileJoined <- shapefile %>%
+  mutate(
+    tractCode = if_else(
+      is.na(deaths) & !str_ends(tractCode,'0'),
+      str_c(str_sub(tractCode,start=0,end=nchar(tractCode)-1),'0'),
+      tractCode
+      ),
+    name = str_glue(
+      'Census Tract {str_sub(tractCode,nchar(tractCode)-5,nchar(tractCode)-2)}.{str_sub(tractCode,nchar(tractCode)-1,nchar(tractCode))}'
+      )
+    ) %>%
+  group_by(tractCode,name) %>%
+  summarise(deaths=sum(deaths)) %>%
+  ungroup() %>%
+  select(-deaths)
+```
+
+```{r}
+shapefileJoined <- shapefileJoined %>%
+  left_join(tract.rates,by='tractCode') %>%
+  filter(!is.na(deaths))
+```
+
+```{r}
+mortMaps <- shapefileJoined %>%
+  pivot_longer(cols=c(mrate.pred.mean,mrate),values_to = 'mrate',names_to = 'type') %>%
+  mutate(type=if_else(type=='mrate.pred.mean','Model','Observed')) %>%
+  ggplot() +
+  geom_sf(mapping=aes(fill=mrate*1000)) +
+  scale_fill_continuous_sequential() +
+  facet_wrap(~type) +
+  labs(fill='CDR') +
+  theme_map() +
+  theme(legend.position = 'left')
+
+mortMaps
+```
+
+```{r}
+ggsave(mortMaps,file=here('figures','mortMaps.pdf'),height = 3, width = 7)
+```
+
+```{r}
+shrinkagePlot <- tract.rates %>%
+  ggplot() +
+  geom_hline(yintercept = mean(tract.rates$mrate)) + 
+  geom_segment(mapping=aes(x=geo,xend=geo,y=mrate,yend=mrate.pred.mean)) +
+  geom_point(mapping=aes(x=geo,y=mrate.pred.mean,
+                         shape='Predicted',fill=log(pop)),
+             size=2.5) +
+  geom_point(mapping=aes(x=geo,y=mrate,
+                         shape='Observed'), 
+             size=2.5) +
+  scale_shape_manual(values=c(22,21)) +
+  scale_fill_viridis_c() +
+  labs(x='',
+       y='Log Mortality Rate',
+       shape='',
+       fill='') + 
+  theme_minimal() +
+  theme(legend.position = 'bottom',
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_blank())
+shrinkagePlot
+```

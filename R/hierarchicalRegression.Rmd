@@ -1,0 +1,195 @@
+---
+title: "Modeling Sub-County Mortality by Age"
+author: "Eugenio Paglino"
+date: "\today"
+output:
+  html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+library(here)
+library(lme4)
+library(rstanarm)
+library(rstan)
+library(tidyverse)
+
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r}
+# Do not rely on this to completely clean your environment
+# Better to do a full restart of R before running
+rm(list=ls())
+
+i_am('R/hierarchicalRegression.Rmd')
+inDir <- here('data','input')
+outDir <- here('data','output')
+```
+
+```{r}
+# Set Stan options.
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+set.seed(42)
+```
+
+```{r}
+M <- 10
+P <- 20
+group <- rep(seq(1,10,length.out=M),each=P)
+alphas <- rep(seq(1,0,length.out=M),each=P)
+betas <- rep(seq(-1,1,length.out=M),each=P)
+x <- rep(seq(0,1,length.out=P),times=M)
+y <- alphas + betas*x + rnorm(M*P,0,0.25)
+
+sample <- c(
+  sample(1:20,5),
+  sample(21:40,5),
+  sample(41:60,10),
+  sample(61:80,15),
+  sample(81:100,20),
+  sample(101:120,20),
+  sample(121:140,15),
+  sample(141:160,10),
+  sample(161:180,5),
+  sample(181:200,5)
+  )
+
+y <- y[sample]
+x <- x[sample]
+group <- group[sample]
+```
+
+```{r}
+# Specify data and parameter values.
+data <- list(
+  N = length(y),
+  M = M,
+  y = y,
+  x = x,
+  group = group
+)
+```
+
+```{r}
+data %>%
+  as_tibble() %>%
+  ggplot() +
+  geom_smooth(mapping=aes(x=x,y=y,color=group,group=group),method='lm') +
+  geom_point(mapping=aes(x=x,y=y,color=group)) +
+  scale_color_binned(n.breaks=10,breaks=seq(1,10)) +
+  theme_minimal()
+```
+
+```{r}
+# Generate data.
+bayes_model <- stan(
+  file = here('R','regressionModel.stan'),
+  data = data
+  )
+```
+
+```{r}
+summary(bayes_model)$summary
+```
+
+```{r}
+freq_model <- lm(y ~ 1 + x)
+summary(freq_model)
+```
+
+```{r}
+# Generate data.
+bayes_model_fe <- stan(
+  file = here('R','regressionModelFE.stan'),
+  data = data
+  )
+```
+
+```{r}
+summary(bayes_model_fe)$summary
+```
+
+```{r}
+freq_model_fe <- lm(y ~ -1 + as.factor(group) + x:as.factor(group))
+summary(freq_model_fe)
+```
+
+```{r}
+# Generate data.
+bayes_model_h <- stan(
+  file = here('R','regressionModelH.stan'),
+  data = data
+  )
+```
+
+```{r}
+summary(bayes_model_h)$summary
+```
+
+```{r}
+bayes_model_h_alt <- stan_lmer(y ~ 1 + x + (1 | group) + (0 + x | group))
+```
+
+```{r}
+freq_model_h <- lmer(y ~ 1 + x + (1 | group) + (0 + x | group))
+summary(freq_model_h)
+```
+
+```{r}
+alphas_bfe <- as.numeric(summary(bayes_model_fe)$summary[1:10,'mean'])
+betas_bfe <- as.numeric(summary(bayes_model_fe)$summary[11:20,'mean'])
+
+alphas_ffe <- as.numeric(coef(freq_model_fe)[1:10])
+betas_ffe <- as.numeric(coef(freq_model_fe)[11:20])
+
+alphas_bh <- as.numeric(summary(bayes_model_h)$summary[1:10,'mean'])
+betas_bh <- as.numeric(summary(bayes_model_h)$summary[13:22,'mean'])
+
+alphas_fh <- as.numeric(ranef(freq_model_h)$group[,'(Intercept)'] + fixef(freq_model_h)['(Intercept)'])
+betas_fh <- as.numeric(ranef(freq_model_h)$group[,'x'] + fixef(freq_model_h)['x'])
+
+alphas_bha <- as.numeric(ranef(bayes_model_h_alt)$group[,'(Intercept)'] + fixef(freq_model_h)['(Intercept)'])
+betas_bha <- as.numeric(ranef(bayes_model_h_alt)$group[,'x'] + fixef(freq_model_h)['x'])
+```
+
+```{r}
+comp_data <- tibble(
+  alpha = c(alphas_bfe,alphas_ffe,alphas_bh,alphas_fh,alphas_bha,unique(alphas)),
+  beta = c(betas_bfe,betas_ffe,betas_bh,betas_fh,betas_bha,unique(betas)),
+  group = rep(seq(1,10),times=6),
+  type=rep(c('BFE','FFE','BH','FH','BHA','A'),each=M)
+)
+```
+
+```{r}
+comp_data %>%
+  filter(type!='BHA') %>%
+  ggplot() +
+  geom_hline(yintercept=coef(freq_model)[1]) +
+  geom_point(mapping=aes(x=group,y=alpha,shape=type)) +
+  labs(x='') +
+  theme_minimal()
+```
+
+
+```{r}
+comp_data %>%
+  filter(type!='BHA') %>%
+  ggplot() +
+  geom_hline(yintercept=coef(freq_model)[1]) +
+  geom_point(mapping=aes(x=group,y=beta,shape=type)) +
+  labs(x='') +
+  theme_minimal()
+```

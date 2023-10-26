@@ -1,0 +1,267 @@
+---
+title: "Create Subdivition-Level Life Tables"
+author: "Eugenio Paglino"
+output: html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+library(glue)
+library(ggthemes)
+library(here)
+library(gt)
+library(leaflet)
+library(tidyverse)
+
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r, echo=FALSE, message=F, warning=F}
+# Do not rely on this to completely clean your environment
+# Better to do a full restart of R before running
+rm(list=ls())
+
+i_am('R/createLifeTablesTracts.Rmd')
+
+inDir <- here('data','input')
+outDir <- here('data','output')
+```
+
+```{r}
+ltData <- read_csv(here(outDir,'ltModelMWDataForTracts.csv'))
+```
+
+```{r}
+prepare_data_for_lt <- function(data) {
+  data <- data %>%
+    arrange(x) %>%
+    select(x,
+           nDx=deaths,
+           nNx=pop,
+           nmx=mrate) %>%
+    mutate(n=dplyr::lead(x) - x,
+           n=if_else(x==85,Inf,n))
+  data
+}
+```
+
+```{r}
+default_nax <- function(life_table,first_year_m,sex) {
+  x = life_table['x']
+  n = life_table['n']
+  nmx = life_table['nmx']
+  
+  if (x == 0) {
+    return(1.5)
+  } else if (x>1 & is.finite(n)) {
+    return(n/2)
+  } else if (is.infinite(n)) {
+    return(1/nmx)
+  }
+}
+```
+
+```{r}
+keyfitz_graduation <- function(lt, .n=5, tol=0.0001) {
+  naxold <- lt %>% pull(nax)
+  diff <- Inf
+  N <- nrow(lt) # Number of age groups 
+  # Iterate until no nax changes by more than tol between iterations
+  while(diff > 0.0001) {
+    naxnew <- (-.n/24 * lag(lt$ndx) + .n/2 * lt$ndx + .n/24 * lead(lt$ndx)) / lt$ndx
+	  naxnew <- c(naxold[1:2], naxnew[c(-1,-2,-N)], (1/lt$nmx)[N])
+	  diff <- max(naxnew - naxold, na.rm=TRUE)
+    naxold <- naxnew
+    lt <- lt %>% mutate(nax = naxnew)
+    lt <- m_to_q_conversion(lt)
+  }
+  lt
+}
+```
+
+```{r}
+q_from_m <- function(m,a,n) {
+  numerator <- n*m
+  denominator <- 1 + (n-a)*m
+  nqx <- numerator/denominator
+  nqx <- if_else(is.infinite(n),1,nqx)
+  return(nqx)
+}
+```
+
+```{r}
+m_to_q_conversion <- function(lt,radix=100000,compute_nqx=T) {
+  
+  if (compute_nqx) {
+    lt <- lt %>%
+      mutate(nqx = q_from_m(nmx,nax,n))
+  }
+  
+  lt <- lt %>%
+    mutate(
+      npx = 1-nqx,
+      lx = lag(radix*cumprod(npx)),
+      lx = if_else(is.na(lx),radix,lx),
+      ndx=nqx*lx
+      ) 
+  lt
+}
+```
+
+```{r}
+create_life_table <- function(data,radix=100000,graduation=F,ltS=NULL,group=NULL) { 
+
+  data <- prepare_data_for_lt(data)
+  
+  lt <- data %>%
+    mutate(
+      nax = apply(
+      data,
+      M=1,
+      default_nax,
+      first_year_m=as.double(data[1,'nmx'])
+      )
+    )
+    
+  lt <- m_to_q_conversion(lt)
+  
+  if (graduation) lt <- keyfitz_graduation(lt)
+  
+  lt <- m_to_q_conversion(lt,compute_nqx=F)
+  
+  lt <- lt %>%
+    mutate(
+      nLx=(n*npx + nax*nqx)*lx,
+      nLx=if_else(is.infinite(n),lx/nmx,nLx),
+      Tx=rev(cumsum(rev(nLx))),
+      ex=Tx/lx
+      )
+  
+  lt
+}
+```
+
+```{r}
+groupedData <- ltData %>%
+  rename(group=tractCode) %>%
+  mutate(mrate=exp(log_rate.post.mean)) %>%
+  group_by(group) %>%
+  nest()
+```
+
+```{r}
+lifeTables <- map2(
+  groupedData$data,
+  groupedData$group,
+  ~ create_life_table(.x) %>%
+    mutate(group=.y)
+  )
+
+lifeTablesGrad <- map2(
+  groupedData$data,
+  groupedData$group,
+  ~ create_life_table(.x,graduation=T) %>%
+    mutate(group=.y)
+  )
+
+names(lifeTables) <- groupedData$group
+names(lifeTablesGrad) <- groupedData$group
+```
+
+```{r}
+e0Data <- groupedData %>%
+  select(-data) %>%
+  ungroup() %>%
+  mutate(e0 = as.numeric(map(lifeTablesGrad,~ as.double(.x[1,'ex'])))) %>%
+  rename(tractCode = group) %>%
+  mutate(tractCode=as.character(tractCode))
+```
+
+```{r}
+shapefile <- sf::read_sf(here(inDir,'tl_2020_25_tract','tl_2020_25_tract.shp'))
+shapefile <- shapefile %>%
+  filter(ALAND>0) %>%
+  select(tractCode=GEOID,
+         name=NAMELSAD)
+```
+
+```{r}
+shapefile <- shapefile %>%
+  left_join(
+    e0Data %>%
+      group_by(tractCode) %>%
+      summarise(e0=sum(e0)) %>%
+      ungroup(),
+    by='tractCode'
+  )
+```
+
+```{r}
+shapefileJoined <- shapefile %>%
+  mutate(
+    tractCode = if_else(
+      is.na(e0) & !str_ends(tractCode,'0'),
+      str_c(str_sub(tractCode,start=0,end=nchar(tractCode)-1),'0'),
+      tractCode
+      ),
+    name = str_glue(
+      'Census Tract {str_sub(tractCode,nchar(tractCode)-5,nchar(tractCode)-2)}.{str_sub(tractCode,nchar(tractCode)-1,nchar(tractCode))}'
+      )
+    ) %>%
+  group_by(tractCode,name) %>%
+  summarise(e0=sum(e0)) %>%
+  ungroup() %>%
+  select(-e0)
+```
+
+```{r}
+shapefileJoined <- shapefileJoined %>%
+  left_join(e0Data,by='tractCode') %>%
+  filter(!is.na(e0))
+```
+
+```{r}
+pal <- colorNumeric("Blues", NULL)
+
+shapefileJoined %>% 
+  sf::st_transform('+proj=longlat +datum=WGS84') %>%
+  leaflet() %>% 
+  setView(lng = -72.0589, lat = 42.3601, zoom = 8) %>%
+  addTiles() %>%
+  addPolygons(stroke = FALSE, 
+              smoothFactor = 0.3,
+              fillOpacity = 0.8,
+              fillColor = ~pal(e0)) %>%
+  addLegend(pal = pal, values = ~e0, opacity = 0.8)
+```
+
+```{r}
+LEMap <- shapefileJoined %>%
+  ggplot() +
+  geom_sf(mapping=aes(fill=e0)) +
+  labs(fill='Life-Expectancy') +
+  theme_map() +
+  theme(legend.position = 'left')
+
+LEMap
+```
+
+```{r}
+pdf(here('figures','LETractMap.pdf'), width = 7, height = 4)
+LEMap
+dev.off()
+```
+
+```{r}
+e0Data %>%
+  write_csv(.,here(outDir,'e0ByTract.csv'))
+```

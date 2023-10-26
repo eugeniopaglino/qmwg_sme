@@ -1,0 +1,163 @@
+---
+title: "Creating Final Data"
+author: "Eugenio Paglino"
+date: "\today"
+output:
+  html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+library(readxl)
+library(here)
+library(magrittr)
+library(tidyverse)
+
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r}
+# Do not rely on this to completely clean your environment
+# Better to do a full restart of R before running
+rm(list=ls())
+
+i_am('R/cleanData.Rmd')
+inDir <- here('data','input')
+outDir <- here('data','output')
+```
+
+```{r}
+deaths <- read_excel(here(inDir,'source.xlsx'), sheet = "D")
+pop <- read_excel(here(inDir,'source.xlsx'), sheet = "P")
+```
+
+```{r}
+deaths <- deaths %>% 
+  pivot_longer(`_00Y`:`_85Y`,names_to = 'x',values_to = 'deaths')
+
+pop <- pop %>% 
+  pivot_longer(`_00Y`:`_85Y`,names_to = 'x',values_to = 'pop')
+
+ltData <- deaths %>%
+  left_join(pop,by=c('SubDivCode','x'))
+
+ltData <- ltData %>%
+  mutate(deaths = as.integer(deaths),
+         pop = as.integer(pop),
+         x=as.integer(str_sub(x,2,3))) %>%
+  rename(subdivCode = SubDivCode)
+```
+
+```{r}
+ltData %>% write_csv(here(outDir,'ltData.csv'))
+```
+
+```{r}
+X <- ltData %>%
+  group_by(subdivCode) %>%
+  mutate(minDeaths = min(deaths),
+         totalPop = sum(pop)) %>%
+  ungroup() %>%
+  filter(minDeaths>0,
+         totalPop>100000) %>%
+  mutate(logMortRate = log(deaths/pop)) %>%
+  select(subdivCode,x,logMortRate) %>%
+  pivot_wider(names_from = x, values_from = logMortRate)
+
+X <- X %>%
+  select(-subdivCode) %>%
+  as.matrix()
+```
+
+```{r}
+ageSVD <- svd(t(X))
+```
+
+```{r}
+SVDComponents <- ageSVD$u[,1:3]
+SVDComponents <- apply(SVDComponents,M=2,function(x) modelbased::smoothing(x,strength = 0.6))
+SVDComponents[,3] <- SVDComponents[,3]*(-1)
+SVDComponents <- apply(SVDComponents,M=2,function(x) (x-mean(x))/sd(x))
+```
+
+```{r}
+par(mfrow=c(1,3))
+plot(SVDComponents[,1],type='l',xlab='',ylab='',main='Basic Shape')
+plot(SVDComponents[,2],type='l',xlab='',ylab='',main='High Child Mortality')
+plot(SVDComponents[,3],type='l',xlab='',ylab='',main='High Adult Mortality')
+```
+
+```{r}
+pdf(here('figures','ageComponents.pdf'), height=4, width=10)
+par(mfrow=c(1,3))
+plot(SVDComponents[,1],type='l',xlab='',ylab='',main='Basic Shape')
+plot(SVDComponents[,2],type='l',xlab='',ylab='',main='High Child Mortality')
+plot(SVDComponents[,3],type='l',xlab='',ylab='',main='High Adult Mortality')
+dev.off()
+```
+
+```{r}
+save(SVDComponents,file=here(outDir,'ageComponents.RData'))
+```
+
+```{r}
+X <- ltData %>%
+  mutate(x = if_else(x<5,0,x)) %>%
+  group_by(subdivCode,x) %>%
+  summarise(deaths = sum(deaths),
+            pop = sum(pop)) %>%
+  ungroup() %>%
+  group_by(subdivCode) %>%
+  mutate(minDeaths = min(deaths),
+         totalPop = sum(pop)) %>%
+  ungroup() %>%
+  filter(minDeaths>0,
+         totalPop>100000) %>%
+  mutate(logMortRate = log(deaths/pop)) %>%
+  select(subdivCode,x,logMortRate) %>%
+  pivot_wider(names_from = x, values_from = logMortRate)
+
+X <- X %>%
+  select(-subdivCode) %>%
+  as.matrix()
+```
+
+```{r}
+ageSVD <- svd(t(X))
+```
+
+```{r}
+SVDComponents <- ageSVD$u[,1:3]
+SVDComponents <- apply(SVDComponents,M=2,function(x) modelbased::smoothing(x,strength = 0.6))
+SVDComponents <- SVDComponents*(-1)
+SVDComponents <- apply(SVDComponents,M=2,function(x) (x-mean(x))/sd(x))
+```
+
+```{r}
+par(mfrow=c(1,3))
+plot(SVDComponents[,1],type='l',xlab='',ylab='',main='Basic Shape')
+plot(SVDComponents[,2],type='l',xlab='',ylab='',main='High Child Mortality')
+plot(SVDComponents[,3],type='l',xlab='',ylab='',main='High Adult Mortality')
+```
+
+```{r}
+pdf(here('figures','ageComponents04.pdf'), height=3, width=6)
+par(mfrow=c(1,3))
+plot(SVDComponents[,1],type='l',xlab='',ylab='',main='Basic Shape')
+plot(SVDComponents[,2],type='l',xlab='',ylab='',main='High Child Mortality')
+plot(SVDComponents[,3],type='l',xlab='',ylab='',main='High Adult Mortality')
+dev.off()
+```
+
+```{r}
+save(SVDComponents,file=here(outDir,'ageComponents04.RData'))
+```
