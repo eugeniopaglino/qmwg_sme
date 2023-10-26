@@ -183,7 +183,6 @@ comp_data %>%
   theme_minimal()
 ```
 
-
 ```{r}
 comp_data %>%
   filter(type!='BHA') %>%

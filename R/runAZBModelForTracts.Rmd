@@ -422,11 +422,11 @@ ggsave(mortMaps,file=here('figures','mortMaps.pdf'),height = 3, width = 7)
 shrinkagePlot <- tract.rates %>%
   ggplot() +
   geom_hline(yintercept = mean(tract.rates$mrate)) + 
-  geom_segment(mapping=aes(x=geo,xend=geo,y=mrate,yend=mrate.pred.mean)) +
-  geom_point(mapping=aes(x=geo,y=mrate.pred.mean,
+  geom_segment(mapping=aes(x=tractCode,xend=tractCode,y=mrate,yend=mrate.pred.mean)) +
+  geom_point(mapping=aes(x=tractCode,y=mrate.pred.mean,
                          shape='Predicted',fill=log(pop)),
              size=2.5) +
-  geom_point(mapping=aes(x=geo,y=mrate,
+  geom_point(mapping=aes(x=tractCode,y=mrate,
                          shape='Observed'), 
              size=2.5) +
   scale_shape_manual(values=c(22,21)) +
